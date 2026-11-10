@@ -59,11 +59,20 @@ add_subdirectory("${sdl_SOURCE_DIR}" "${sdl_BINARY_DIR}" EXCLUDE_FROM_ALL)
 add_subdirectory("${assimp_SOURCE_DIR}" "${assimp_BINARY_DIR}" EXCLUDE_FROM_ALL)
 if(WIN32)
     # Assimp's bundled poly2tri uses std::ostream without including its header.
+    # Scope the forced include to the C++ sources so it stays out of Assimp's C files.
+    set(poly2tri "${assimp_SOURCE_DIR}/contrib/poly2tri/poly2tri")
     if(MSVC)
-        target_compile_options(assimp PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/FIostream>")
+        set(poly2tri_include /FIostream)
     else()
-        target_compile_options(assimp PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-include;ostream>")
+        set(poly2tri_include -include ostream)
     endif()
+    set_property(SOURCE
+        "${poly2tri}/common/shapes.cc"
+        "${poly2tri}/sweep/advancing_front.cc"
+        "${poly2tri}/sweep/cdt.cc"
+        "${poly2tri}/sweep/sweep.cc"
+        "${poly2tri}/sweep/sweep_context.cc"
+        TARGET_DIRECTORY assimp APPEND PROPERTY COMPILE_OPTIONS ${poly2tri_include})
 endif()
 
 find_package(OpenGL REQUIRED)
