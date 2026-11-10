@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(ModelViewer VERSION 1.0.0 LANGUAGES C CXX)
+project(ModelViewer VERSION 1.0.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -106,7 +106,21 @@ else()
     target_compile_options(viewer_model PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>")
 endif()
 
+set(viewer_icon_dir "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+if(APPLE)
+    set(app_icon "${viewer_icon_dir}/ModelViewer.icns")
+    set_source_files_properties("${app_icon}" PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    target_sources(ModelViewer PRIVATE "${app_icon}")
+elseif(WIN32)
+    enable_language(RC)
+    set(icon_resource "${CMAKE_CURRENT_BINARY_DIR}/ModelViewer.rc")
+    configure_file(script/ModelViewer.rc.in "${icon_resource}" @ONLY)
+    set_source_files_properties("${icon_resource}" PROPERTIES OBJECT_DEPENDS "${viewer_icon_dir}/ModelViewer.ico")
+    target_sources(ModelViewer PRIVATE "${icon_resource}")
+endif()
+
 set_target_properties(ModelViewer PROPERTIES
+    MACOSX_BUNDLE_ICON_FILE "ModelViewer.icns"
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/script/Info.plist.in"
     MACOSX_BUNDLE_GUI_IDENTIFIER "local.modelviewer.app"
     MACOSX_BUNDLE_BUNDLE_NAME "Model Viewer"
