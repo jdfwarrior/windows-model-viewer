@@ -1,0 +1,143 @@
+name: Build and publish release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Check release version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Match tag to the application version
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Use a release tag in the form v1.2.3."
+            exit 1
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          if ! grep -Fxq "project(ModelViewer VERSION $version LANGUAGES C CXX)" CMakeLists.txt; then
+            echo "::error::Update the version in CMakeLists.txt to match the release tag."
+            exit 1
+          fi
+
+  macos:
+    name: macOS universal
+    needs: version
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and package
+        shell: bash
+        run: |
+          ./script/build_and_run.sh --universal --build-only
+          bundle=dist/ModelViewer.app
+          for architecture in arm64 x86_64; do
+            lipo "$bundle/Contents/MacOS/ModelViewer" -verify_arch "$architecture"
+          done
+          test "$(plutil -extract CFBundleShortVersionString raw -o - "$bundle/Contents/Info.plist")" = "${GITHUB_REF_NAME#v}"
+
+          mkdir -p release-assets
+          archive="release-assets/ModelViewer-$GITHUB_REF_NAME-macOS-universal.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$bundle" "$archive"
+          ditto -x -k "$archive" "$RUNNER_TEMP/package-check"
+          codesign --verify --strict "$RUNNER_TEMP/package-check/ModelViewer.app"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-macos-universal
+          path: release-assets/*.zip
+          if-no-files-found: error
+
+  windows:
+    name: Windows ${{ matrix.architecture }}
+    needs: version
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [x64, ARM64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and package
+        shell: pwsh
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          ./script/build-windows.ps1 -Architecture $env:ARCHITECTURE
+          $stage = "dist/windows-$env:ARCHITECTURE"
+          if (-not (Test-Path -LiteralPath "$stage/ModelViewer.exe" -PathType Leaf)) {
+            throw "ModelViewer.exe is missing from the package."
+          }
+          New-Item -ItemType Directory -Path release-assets -Force | Out-Null
+          $archive = "release-assets/ModelViewer-$env:GITHUB_REF_NAME-Windows-$env:ARCHITECTURE.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath $archive
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-windows-${{ matrix.architecture }}
+          path: release-assets/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [macos, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: package-*
+          merge-multiple: true
+          path: release-assets
+      - name: Publish packages and checksums
+        shell: bash
+        working-directory: release-assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          packages=(
+            "ModelViewer-$tag-macOS-universal.zip"
+            "ModelViewer-$tag-Windows-x64.zip"
+            "ModelViewer-$tag-Windows-ARM64.zip"
+          )
+          sha256sum -- "${packages[@]}" > SHA256SUMS.txt
+          assets=("${packages[@]}" SHA256SUMS.txt)
+
+          if draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [[ "$draft" == true ]]; then
+              gh release upload "$tag" "${assets[@]}" --clobber
+              gh release edit "$tag" --draft=false
+            else
+              echo "Release $tag is already published."
+            fi
+            exit 0
+          fi
+
+          notes="$RUNNER_TEMP/release-notes.md"
+          cat > "$notes" <<'NOTES'
+          Model Viewer opens glTF, GLB, FBX, and 3DS models. Blender files open through a separate Blender installation.
+
+          - **macOS** — The universal archive supports Apple silicon and Intel. Extract it and open `ModelViewer.app`. The app is ad hoc signed and has no Apple notarization.
+          - **Windows** — Choose the x64 or ARM64 archive, extract it, and open `ModelViewer.exe`. The executable has no Authenticode signature.
+          - **Checksums** — `SHA256SUMS.txt` lists the SHA-256 digest of each archive.
+          NOTES
+          gh release create "$tag" "${assets[@]}" --verify-tag \
+            --title "Model Viewer ${tag#v}" --notes-file "$notes"
